@@ -1222,6 +1222,71 @@
 ;; The following section provides a number of utilities for building quaternions
 ;; that represent rotations, and moving quaternions and other representations of
 ;; rotations in 3d and 4d space.
+
+;; ### Rotating Vectors
+
+;; To rotate a 3-vector by the angle prescribed by a unit quaternion.
+
+;; TODO see if it's more efficient to do this, AND if so move the next one to
+;; the tests.
+
+;; check against https://github.com/infusion/Quaternion.js/blob/master/quaternion.js#L816-L844
+(defn rotate
+  "Rotate a vector with a quaternion."
+  [q v]
+  {:pre [(quaternion? q)
+         (vector? v)
+         (= 3 (count v))]}
+  (let [[vx vy vz] v
+        [qw qx qy qz] q]
+    [(g/+ (g/* qw qw vx)       (g/* 2 qy qw vz) (g/* -2 qz qw vy)    (g/* qx qx vx)
+          (g/* 2 qy qx vy)     (g/* 2 qz qx vz) (g/- (g/* qz qz vx)) (g/- (g/* qy qy vx)))
+     (g/+ (g/* 2 qx qy vx)     (g/* qy qy vy)   (g/* 2 qz qy vz)     (g/* 2 qw qz vx)
+          (g/- (g/* qz qz vy)) (g/* qw qw vy)   (g/* -2 qx qw vz)    (g/- (g/* qx qx vy)))
+     (g/+ (g/* 2 qx qz vx)     (g/* 2 qy qz vy) (g/* qz qz vz)       (g/* -2 qw qy vx)
+          (g/- (g/* qy qy vz)) (g/* 2 qw qx vy) (g/- (g/* qx qx vz)) (g/* qw qw vz))]))
+
+;; TODO see if this is better with symbolic?
+
+(defn- gjs-rotate [q]
+  {:pre [(quaternion? q)]}
+  ;; TODO copy rotation from above. This returns a rotation function??
+  ;;(assert (q:unit? q)) This assertion is really:
+
+  ;; TODO log this `assume-unit!` as a new function, have it throw on false.
+  ;;
+  ;; TODO move this implementation to the tests?
+  (let [vv (->vector q)
+        v  (g/simplify (g/dot-product vv vv))]
+    (ul/assume! (list '= v 1) 'rotate))
+  (let [q* (conjugate q)]
+    (fn the-rotation [three-v]
+      (three-vector
+       (mul q (make 0 three-v) q*)))))
+
+;; TODO Calculates the quaternion to rotate one vector onto the other
+;;
+;; https://github.com/infusion/Quaternion.js/blob/master/quaternion.js#L941
+(defn from-between-vectors [u v])
+
+;; https://en.wikipedia.org/wiki/Slerp#Quaternion_Slerp
+;;
+;; TODO use defgeneric? can we take derivatives?
+;;
+;; https://github.com/infusion/Quaternion.js/blob/master/quaternion.js#L846-L901
+
+;; Spherically interpolates between quaternions a and b by ratio t. The parameter t is clamped to the range [0, 1].
+;;
+;; TODO more notes https://www.euclideanspace.com/maths/algebra/realNormedAlgebra/quaternions/slerp/index.htm
+;;
+;; MORE notes: https://blog.magnum.graphics/backstage/the-unnecessarily-short-ways-to-do-a-quaternion-slerp/
+(defn slerp [q0 q1 t])
+
+;; description http://number-none.com/product/Understanding%20Slerp,%20Then%20Not%20Using%20It/
+
+;; TODO add this too??
+(defn lerp [])
+
 ;;
 ;;
 ;; ### Conversion to/from Angle-Axis
@@ -1314,6 +1379,325 @@
             theta (g/mul 2 (g/atan v-mag (real-part q)))
             axis (g/div v v-mag)]
         [theta axis]))))
+
+;; ## To/From 3D axes
+;;
+;; NOTE this one is weird. I think this is, give me the new orthogonal set of
+;; axes you want to point at, and I will generate a rotation to get to those.
+
+(defn from-axes
+  "Create a quaternion from three axis vectors."
+  [x-axis y-axis z-axis]
+  (let [[m00 m10 m20] x-axis
+        [m01 m11 m21] y-axis
+        [m02 m12 m22] z-axis
+        trace (g/+ m00 m11 m22)]
+    (cond
+      (>= trace 0)
+      (let [s (g/sqrt (inc trace))
+            r (/ 0.5 s)]
+        (make (* r (- m21 m12))
+              (* r (- m02 m20))
+              (* r (- m10 m01))
+              (* 0.5 s)))
+
+      (and (> m00 m11) (> m00 m22))
+      (let [s (Math/sqrt (- (inc m00) m11 m22))
+            r (/ 0.5 s)]
+        (make (* 0.5 s)
+              (* r (+ m10 m01))
+              (* r (+ m02 m20))
+              (* r (- m21 m12))))
+
+      (> m11 m22)
+      (let [s (Math/sqrt (- (inc m11) m00 m22))
+            r (/ 0.5 s)]
+        (make (* r (+ m10 m01))
+              (* 0.5 s)
+              (* r (+ m21 m12))
+              (* r (- m02 m20))))
+
+      :else
+      (let [s (Math/sqrt (- (inc m22) m00 m11))
+            r (/ 0.5 s)]
+        (make (* r (+ m02 m20))
+              (* r (+ m21 m12))
+              (* 0.5 s)
+              (* r (- m10 m01)))))))
+
+(defn ->axes
+  "Return the three axes of the quaternion."
+  [q]
+  ;; NOTE that this norm was actually the dot-product.
+  (let [n (magnitude-sq q)]
+    (if (and (v/number? n)
+             (or (v/zero? n)
+                 (g/negative? n)))
+      (m/I 3)
+      (let [;; TODO check assumption here! for symbolic we can log an assumption.
+            ;; Can we hardcode the zero case more easily, since so much disappears?
+            s (g// 2 n)
+            [w x y z] q
+            xs (g/* x s)  ys (g/* y s)  zs (g/* z s)  ws (g/* w s)
+            xx (g/* x xs) xy (g/* x ys) xz (g/* x zs) xw (g/* x ws)
+            yy (g/* y ys) yz (g/* y zs) yw (g/* y ws)
+            zz (g/* z zs) zw (g/* z ws)]
+        [[(g/- 1 (g/+ yy zz)) (g/+ xy zw) (g/- xz yw)]
+         [(g/- xy zw) (g/- 1 (g/+ xx zz)) (g/+ yz xw)]
+         [(g/+ xz yw) (g/- yz xw) (g/- 1 (g/+ xx yy))]]))))
+
+(defn ^:no-doc v:normalize [v]
+  (let [invnorm (g/invert
+                 (g/abs v))]
+    (g/* invnorm v)))
+
+(defn look-at
+  "Create a quaternion that is directed at a point specified by a vector."
+  [direction up]
+  (let [z-axis (v:normalize direction)
+        x-axis (v:normalize (g/cross-product up direction))
+        y-axis (v:normalize (g/cross-product direction x-axis))]
+    (from-axes x-axis y-axis z-axis)))
+
+;; ## Matrices
+;;
+;; ### 2x2 Complex
+
+(defn ->complex-matrix
+  "Returns a 2x2 complex matrix representation of a Quaternion q:
+
+  [ a + b i,  c + d i]
+  [ -c + d i, a - b i]
+
+  NOTE only works for real entries for now."
+  [q]
+  (let [[r i j k] q]
+    (m/by-rows
+     [(g/make-rectangular r i)
+      (g/make-rectangular j k)]
+     [(g/make-rectangular (g/negate j) k)
+      (g/make-rectangular r (g/negate i))])))
+
+;; TODO
+(defn from-complex-matrix []
+  )
+
+;; ### Quaternions as 4x4 matrices
+
+(def ^{:doc "one!"}
+  ONE-matrix
+  (m/by-rows
+   [1 0 0 0]
+   [0 1 0 0]
+   [0 0 1 0]
+   [0 0 0 1]))
+
+(def ^{:doc "I!"}
+  I-matrix
+  (m/by-rows
+   [0 1 0 0]
+   [-1 0 0 0]
+   [0 0 0 -1]
+   [0 0 1 0]))
+
+(def ^{:doc "J!"}
+  J-matrix
+  (m/by-rows
+   [0 0 1 0]
+   [0 0 0 1]
+   [-1 0 0 0]
+   [0 -1 0 0]))
+
+(def ^{:doc "K!"}
+  K-matrix
+  (m/by-rows
+   [0 0 0 1]
+   [0 0 -1 0]
+   [0 1 0 0]
+   [-1 0 0 0]))
+
+(def ^{:doc "ONE!"}
+  ONE-tensor
+  (m/->structure ONE-matrix))
+
+(def ^{:doc "I"}
+  I-tensor
+  (m/->structure I-matrix))
+
+(def ^{:doc "J"}
+  J-tensor
+  (m/->structure J-matrix))
+
+(def ^{:doc "J"}
+  K-tensor
+  (m/->structure K-matrix))
+
+(defn from-4x4-matrix
+  "TODO what is the deal with this first row thing?? Well, there is obviously lots
+  of redundancy in the matrix... first row seems to do it!"
+  [four-matrix]
+  (make
+   (nth four-matrix 0)))
+
+(defn ->4x4-matrix
+  "Returns a 4x4 matrix that represents the supplied [[Quaternion]] `q`."
+  [q]
+  (g/+ (g/* (get-r q) ONE-matrix)
+       (g/* (get-i q) I-matrix)
+       (g/* (get-j q) J-matrix)
+       (g/* (get-k q) K-matrix)))
+
+;; ## Relation to 3x3 Rotation Matrices
+;;
+;; Expanded Matt Mason method.
+
+;; TODO get the simplify stuff going, maybe in a separate PR... AND remove this
+;; `careful-simplify` stuff.
+
+(def careful-simplify g/simplify)
+
+;; TODO change to `from-rotation-matrix`
+
+(defn rotation-matrix->
+  "TODO change >= etc to using compare... OR just go ahead and add those to v/
+  finally!"
+  [M]
+  ;; (assert (orthogonal-matrix? M))
+  ;; returns a unit quaternion
+  (let [r11 (get-in M [0 0]) r12 (get-in M [0 1]) r13 (get-in M [0 2])
+        r21 (get-in M [1 0]) r22 (get-in M [1 1]) r23 (get-in M [1 2])
+        r31 (get-in M [2 0]) r32 (get-in M [2 1]) r33 (get-in M [2 2])
+        quarter (g// 1 4)
+
+        q0-2 (g/* quarter (g/+ 1 r11 r22 r33))
+        q1-2 (g/* quarter (g/+ 1 r11 (g/- r22) (g/- r33)))
+        q2-2 (g/* quarter (g/+ 1 (g/- r11) r22 (g/- r33)))
+        q3-2 (g/* quarter (g/+ 1 (g/- r11) (g/- r22) r33))
+
+        q0q1 (g/* quarter (g/- r32 r23))
+        q0q2 (g/* quarter (g/- r13 r31))
+        q0q3 (g/* quarter (g/- r21 r12))
+        q1q2 (g/* quarter (g/+ r12 r21))
+        q1q3 (g/* quarter (g/+ r13 r31))
+        q2q3 (g/* quarter (g/+ r23 r32))
+
+        q0-2s (careful-simplify q0-2)
+        q1-2s (careful-simplify q1-2)
+        q2-2s (careful-simplify q2-2)
+        q3-2s (careful-simplify q3-2)]
+    (cond (and (v/number? q0-2s) (v/number? q1-2s)
+               (v/number? q2-2s) (v/number? q3-2s))
+          (cond (>= q0-2s (max q1-2s q2-2s q3-2s))
+                (let [q0 (g/sqrt q0-2s)
+                      q1 (g// q0q1 q0)
+                      q2 (g// q0q2 q0)
+                      q3 (g// q0q3 q0)]
+                  (make q0 q1 q2 q3))
+
+                (>= q1-2s (max q0-2s q2-2s q3-2s))
+                (let [q1 (g/sqrt q1-2s)
+                      q0 (g// q0q1 q1)
+                      q2 (g// q1q2 q1)
+                      q3 (g// q1q3 q1)]
+                  (make q0 q1 q2 q3))
+
+                (>= q2-2s (max q0-2s q1-2s q3-2s))
+                (let [q2 (g/sqrt q2-2s)
+                      q0 (g// q0q2 q2)
+                      q1 (g// q1q2 q2)
+                      q3 (g// q2q3 q2)]
+                  (make q0 q1 q2 q3))
+
+                :else
+                (let [q3 (g/sqrt q3-2s)
+                      q0 (g// q0q3 q3)
+                      q1 (g// q1q3 q3)
+                      q2 (g// q2q3 q3)]
+                  (make q0 q1 q2 q3)))
+
+          (not (v/numeric-zero? q0-2s))
+          (let [q0 (g/sqrt q0-2)
+                q1 (g// q0q1 q0)
+                q2 (g// q0q2 q0)
+                q3 (g// q0q3 q0)]
+            (make q0 q1 q2 q3))
+
+          (not (v/numeric-zero? q1-2s))
+          (let [q1 (g/sqrt q1-2)
+                q0 0
+                q2 (g// q1q2 q1)
+                q3 (g// q1q3 q1)]
+            (make q0 q1 q2 q3))
+
+          (not (v/numeric-zero? q2-2s))
+          (let [q2 (g/sqrt q2-2)
+                q0 0
+                q1 0
+                q3 (g// q2q3 q2)]
+            (make q0 q1 q2 q3))
+
+          :else (make 0 0 0 0))))
+
+(defn ->rotation-matrix [q]
+  {:pre [(quaternion? q)]}
+  ;;(assert (q:unit? q))
+  ;; This assertion is really:
+  ;; TODO same thing, pull out assumption!!
+  (let [vv (->vector q)
+        v  (g/simplify (g/dot-product vv vv))]
+    (ul/assume! (list '= v 1) 'quaternion->rotation-matrix))
+  (let [q0 (get-r q) q1 (get-i q)
+        q2 (get-j q) q3 (get-k q)
+        m-2 (g/+ (g/square q0) (g/square q1)
+                 (g/square q2) (g/square q3))]
+    (m/by-rows [(g// (g/+ (g/expt q0 2)
+                          (g/expt q1 2)
+                          (g/* -1 (g/expt q2 2))
+                          (g/* -1 (g/expt q3 2)))
+                     m-2)
+                (g// (g/* 2 (g/- (g/* q1 q2) (g/* q0 q3)))
+                     m-2)
+                (g// (g/* 2 (g/+ (g/* q1 q3) (g/* q0 q2)))
+                     m-2)]
+               [(g// (g/* 2 (g/+ (g/* q1 q2) (g/* q0 q3)))
+                     m-2)
+                (g// (g/+ (g/expt q0 2)
+                          (g/* -1 (g/expt q1 2))
+                          (g/expt q2 2)
+                          (g/* -1 (g/expt q3 2)))
+                     m-2)
+                (g// (g/* 2 (g/- (g/* q2 q3) (g/* q0 q1)))
+                     m-2)]
+               [(g// (g/* 2 (g/- (g/* q1 q3) (g/* q0 q2)))
+                     m-2)
+                (g// (g/* 2 (g/+ (g/* q2 q3) (g/* q0 q1)))
+                     m-2)
+                (g// (g/+ (g/expt q0 2)
+                          (g/* -1 (g/expt q1 2))
+                          (g/* -1 (g/expt q2 2))
+                          (g/expt q3 2))
+                     m-2)])))
+
+;; ### Euler Angles
+;;
+;; https://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles
+;;
+;;http://www.euclideanspace.com/maths/geometry/rotations/conversions/quaternionToEuler/
+
+;; fromEuler: https://github.com/infusion/Quaternion.js/blob/master/quaternion.js#L994
+(defn from-euler [])
+
+(defn ->euler [])
+
+;; ## Implementation Notes
+;;
+;; TODO slerp https://github.com/infusion/Quaternion.js/
+
+;; slerp notes: https://math.stackexchange.com/questions/93605/understanding-the-value-of-inner-product-of-two-quaternions-in-slerp
+;;
+;; TODO confirm we have ->3x3 matrix and ->4x4 matrix https://github.com/infusion/Quaternion.js/
+;;
+;; TODO quaternion sinum  https://github.com/typelevel/spire/blob/master/core/src/main/scala/spire/math/Quaternion.scala#L187
 
 ;; ## Generic Method Installation
 ;;
